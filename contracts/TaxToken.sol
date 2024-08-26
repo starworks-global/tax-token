@@ -93,6 +93,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
             TaxRecipient memory taxRecipient = taxRecipients_[i];
             totalTaxBase = totalTaxBase + taxRecipient.taxBase;
             taxExempt(taxRecipient.wallet, true);
+            taxRecipients.push(taxRecipient);
         }
 
         require(
@@ -380,11 +381,18 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     function setTaxRecipient(
         TaxRecipient[] calldata taxRecipients_
     ) external onlyOwner {
+        for (uint256 i = 0; i < taxRecipients.length; i++) {
+            TaxRecipient memory taxRecipient = taxRecipients[i];
+            taxExempt(taxRecipient.wallet, false);
+            taxRecipients.pop();
+        }
+
         uint256 totalTaxBase = 0;
         for (uint256 i = 0; i < taxRecipients_.length; i++) {
-            TaxRecipient memory taxRecipient = taxRecipients[i];
+            TaxRecipient memory taxRecipient = taxRecipients_[i];
             totalTaxBase = totalTaxBase + taxRecipient.taxBase;
             taxExempt(taxRecipient.wallet, true);
+            taxRecipients.push(taxRecipient);
         }
         require(
             totalTaxBase == 10000,
