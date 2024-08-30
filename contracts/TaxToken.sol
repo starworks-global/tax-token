@@ -74,16 +74,19 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
      * @param name_ Name of the token.
      * @param symbol_ Symbol of the token.
      * @param initialOwner_ Initial contract owner.
+     * @param totalSupply_ Token total supply.
      * @param taxRecipients_ Tax Recipients list
      */
     constructor(
         string memory name_,
         string memory symbol_,
         address initialOwner_,
+        uint256 totalSupply_,
         TaxRecipient[] memory taxRecipients_
     ) Ownable(initialOwner_) EIP712(name_, "1") {
         _name = name_;
         _symbol = symbol_;
+        _totalSupply = totalSupply_;
 
         taxExempt(address(this), true);
         taxExempt(initialOwner_, true);
@@ -101,8 +104,8 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
             "invalid total tax base for tax recipients"
         );
 
-        _balances[_msgSender()] = totalSupply();
-        emit Transfer(address(0), _msgSender(), totalSupply());
+        _balances[_msgSender()] = _totalSupply;
+        emit Transfer(address(0), _msgSender(), _totalSupply);
     }
 
     /**
@@ -129,8 +132,8 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     /**
      * @notice Get the value of tokens in existence.
      */
-    function totalSupply() public pure override returns (uint256) {
-        return 15000000000 * 10 ** 18;
+    function totalSupply() public view override returns (uint256) {
+        return _totalSupply;
     }
 
     /**
