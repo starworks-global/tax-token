@@ -62,6 +62,7 @@ describe("STARX", function () {
       operator,
       taxRecipient1,
       taxRecipient2,
+      taxRecipient3,
       exchangePool1,
       exchangePool2,
       user1,
@@ -73,7 +74,17 @@ describe("STARX", function () {
         {
           wallet: await taxRecipient1.getAddress(),
           name: "Tax Recipient 1",
-          taxBase: 10000,
+          taxBase: 3000,
+        },
+        {
+          wallet: await taxRecipient2.getAddress(),
+          name: "Tax Recipient 2",
+          taxBase: 3000,
+        },
+        {
+          wallet: await taxRecipient3.getAddress(),
+          name: "Tax Recipient 2",
+          taxBase: 4000,
         },
       ],
     ]);
@@ -134,6 +145,24 @@ describe("STARX", function () {
       await expect(trx)
         .to.emit(starx, "TaxExemptionUpdated")
         .withArgs(await user1.getAddress(), true);
+    });
+
+    it("should revert on double exempt tax", async function () {
+      const { starx, owner, user1 } = await deployFixture();
+
+      const trx = await starx
+        .connect(owner)
+        .taxExempt(await user1.getAddress(), true);
+      await expect(trx)
+        .to.emit(starx, "TaxExemptionUpdated")
+        .withArgs(await user1.getAddress(), true);
+
+      const secondTrx = starx
+        .connect(owner)
+        .taxExempt(await user1.getAddress(), true);
+      await expect(secondTrx).to.be.revertedWith(
+        "account already in exempted list"
+      );
     });
 
     it("should unexempt tax", async function () {
@@ -207,6 +236,46 @@ describe("STARX", function () {
         .withArgs([
           [await taxRecipient1.getAddress(), "Tax Recipient 1", 10000],
         ]);
+    });
+
+    it("should revert when set tax recipient with same address", async function () {
+      const { starx, owner, taxRecipient1 } = await deployFixture();
+
+      const trx = starx.connect(owner).setTaxRecipient([
+        {
+          wallet: await taxRecipient1.getAddress(),
+          name: "Tax Recipient 1",
+          taxBase: 5000,
+        },
+        {
+          wallet: await taxRecipient1.getAddress(),
+          name: "Tax Recipient 2",
+          taxBase: 5000,
+        },
+      ]);
+
+      await expect(trx).to.be.revertedWith("account already in exempted list");
+    });
+
+    it("should revert if tax recipient is zero address", async function () {
+      const { starx, owner, taxRecipient1 } = await deployFixture();
+
+      const trx = starx.connect(owner).setTaxRecipient([
+        {
+          wallet: await taxRecipient1.getAddress(),
+          name: "Tax Recipient 1",
+          taxBase: 5000,
+        },
+        {
+          wallet: "0x0000000000000000000000000000000000000000",
+          name: "Tax Recipient 2",
+          taxBase: 5000,
+        },
+      ]);
+
+      await expect(trx).to.be.revertedWith(
+        "tax recipient must not be the zero address"
+      );
     });
   });
 

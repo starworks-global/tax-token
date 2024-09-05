@@ -3,6 +3,7 @@ pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
@@ -12,6 +13,7 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     using Address for address payable;
     using EnumerableSet for EnumerableSet.AddressSet;
+    using SafeERC20 for IERC20;
 
     /// @dev Struct of tax recipient.
     struct TaxRecipient {
@@ -91,18 +93,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
         taxExempt(address(this), true);
         taxExempt(initialOwner_, true);
 
-        uint256 totalTaxBase = 0;
-        for (uint256 i = 0; i < taxRecipients_.length; i++) {
-            TaxRecipient memory taxRecipient = taxRecipients_[i];
-            totalTaxBase = totalTaxBase + taxRecipient.taxBase;
-            taxExempt(taxRecipient.wallet, true);
-            taxRecipients.push(taxRecipient);
-        }
-
-        require(
-            totalTaxBase == 10000,
-            "invalid total tax base for tax recipients"
-        );
+        _setTaxRecipient(taxRecipients_);
 
         _balances[_msgSender()] = _totalSupply;
         emit Transfer(address(0), _msgSender(), _totalSupply);
@@ -295,7 +286,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
         bytes32 r,
         bytes32 s
     ) public virtual {
-        require(block.timestamp < deadline, "ERC2612: Expired Signature");
+        require(block.timestamp <= deadline, "ERC2612: Expired Signature");
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -349,6 +340,9 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
      */
     function taxExempt(address account, bool isExempt) public onlyOwner {
         if (isExempt) {
+            if (_taxExempted.contains(account)) {
+                revert("account already in exempted list");
+            }
             _taxExempted.add(account);
         } else {
             _taxExempted.remove(account);
@@ -382,26 +376,9 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
      * @param taxRecipients_ Struct of the new tax recipients.
      */
     function setTaxRecipient(
-        TaxRecipient[] calldata taxRecipients_
+        TaxRecipient[] memory taxRecipients_
     ) external onlyOwner {
-        for (uint256 i = 0; i < taxRecipients.length; i++) {
-            TaxRecipient memory taxRecipient = taxRecipients[i];
-            taxExempt(taxRecipient.wallet, false);
-            taxRecipients.pop();
-        }
-
-        uint256 totalTaxBase = 0;
-        for (uint256 i = 0; i < taxRecipients_.length; i++) {
-            TaxRecipient memory taxRecipient = taxRecipients_[i];
-            totalTaxBase = totalTaxBase + taxRecipient.taxBase;
-            taxExempt(taxRecipient.wallet, true);
-            taxRecipients.push(taxRecipient);
-        }
-        require(
-            totalTaxBase == 10000,
-            "invalid total tax base for tax recipients"
-        );
-        emit TaxRecipientUpdated(taxRecipients_);
+        _setTaxRecipient(taxRecipients_);
     }
 
     /**
@@ -439,8 +416,39 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
             address payable owner = payable(owner());
             owner.sendValue(amount);
         } else {
-            IERC20(tokenAddress).transferFrom(address(this), owner(), amount);
+            IERC20(tokenAddress).transfer(owner(), amount);
         }
+    }
+
+    /**
+     * @notice Internal function to sets a new tax recipient lists.
+     * @param taxRecipients_ Struct of the new tax recipients.
+     */
+    function _setTaxRecipient(TaxRecipient[] memory taxRecipients_) internal {
+        for (uint256 i = taxRecipients.length; i > 0; i--) {
+            TaxRecipient memory taxRecipient = taxRecipients[i - 1];
+            taxExempt(taxRecipient.wallet, false);
+            taxRecipients.pop();
+        }
+
+        uint256 totalTaxBase = 0;
+        for (uint256 i = 0; i < taxRecipients_.length; i++) {
+            TaxRecipient memory taxRecipient = taxRecipients_[i];
+            require(
+                taxRecipient.wallet != address(0),
+                "tax recipient must not be the zero address"
+            );
+
+            totalTaxBase = totalTaxBase + taxRecipient.taxBase;
+            taxExempt(taxRecipient.wallet, true);
+            taxRecipients.push(taxRecipient);
+        }
+
+        require(
+            totalTaxBase == 10000,
+            "invalid total tax base for tax recipients"
+        );
+        emit TaxRecipientUpdated(taxRecipients_);
     }
 
     /**
@@ -506,11 +514,18 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
         _balances[to] += taxedValue;
 
         if (tax > 0) {
+            uint256 totalTax = tax;
             for (uint256 i = 0; i < taxRecipients.length; i++) {
                 TaxRecipient memory taxRecipient = taxRecipients[i];
+
                 uint256 taxAmount = (tax * taxRecipient.taxBase) / 10000;
+                if (i == taxRecipients.length - 1) {
+                    taxAmount = totalTax;
+                }
+
                 _balances[address(taxRecipient.wallet)] += taxAmount;
-                emit Transfer(from, address(taxRecipient.wallet), taxAmount);
+                emit Transfer(from, address(taxRecipient.wallet), totalTax);
+                totalTax -= taxAmount;
             }
         }
 
