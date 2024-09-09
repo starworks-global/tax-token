@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
@@ -10,10 +10,26 @@ import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
+contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
     using Address for address payable;
     using EnumerableSet for EnumerableSet.AddressSet;
     using SafeERC20 for IERC20;
+
+    /// @notice The unique identifier constant used to represent blacklister role.
+    /// An address that has this role may call the `setBlacklistStatus` to blacklist or whitelist other addresses.
+    /// This role may be granted or revoked by the DEFAULT_ADMIN_ROLE.
+    bytes32 public constant BLACKLISTER_ROLE = keccak256("BLACKLISTER_ROLE");
+
+    /// @notice The unique identifier constant used to represent tax controller role.
+    /// An address that has this role may controll tax function like `taxExempt`, `setSellTaxBase` and `setBuyTaxBase`.
+    /// This role may be granted or revoked by the DEFAULT_ADMIN_ROLE.
+    bytes32 public constant TAX_CONTROLLER_ROLE =
+        keccak256("TAX_CONTROLLER_ROLE");
+
+    /// @notice The unique identifier constant used to represent burner role.
+    /// An address that has this role may call the `burn` method to burn tokens held by the address.
+    /// This role may be granted or revoked by the DEFAULT_ADMIN_ROLE.
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
     /// @dev Struct of tax recipient.
     struct TaxRecipient {
@@ -46,10 +62,13 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     EnumerableSet.AddressSet private _exchangePools;
 
     /// @notice Buy tax in basis points.
-    uint256 public buyTaxBase = 250;
+    uint256 public buyTaxBase = 1000;
 
     /// @notice Sell tax in basis points.
-    uint256 public sellTaxBase = 4500;
+    uint256 public sellTaxBase = 1000;
+
+    /// @notice Deployer address.
+    address public deployer;
 
     /// @notice Emitted whenever the buy tax basis points value is changed.
     event BuyTaxBaseUpdated(uint256 oldBase, uint256 newBase);
@@ -75,28 +94,23 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     /**
      * @param name_ Name of the token.
      * @param symbol_ Symbol of the token.
-     * @param initialOwner_ Initial contract owner.
-     * @param totalSupply_ Token total supply.
+     * @param defaultAdmin_ Default admin.
      * @param taxRecipients_ Tax Recipients list
      */
     constructor(
         string memory name_,
         string memory symbol_,
-        address initialOwner_,
-        uint256 totalSupply_,
+        address defaultAdmin_,
         TaxRecipient[] memory taxRecipients_
-    ) Ownable(initialOwner_) EIP712(name_, "1") {
+    ) EIP712(name_, "1") {
         _name = name_;
         _symbol = symbol_;
-        _totalSupply = totalSupply_;
+        deployer = _msgSender();
 
-        taxExempt(address(this), true);
-        taxExempt(initialOwner_, true);
-
+        _taxExempt(address(this), true);
         _setTaxRecipient(taxRecipients_);
 
-        _balances[_msgSender()] = _totalSupply;
-        emit Transfer(address(0), _msgSender(), _totalSupply);
+        _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin_);
     }
 
     /**
@@ -153,9 +167,9 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
         address to,
         uint256 value
     ) public view returns (uint256) {
-        // transfer to owner only from blacklisted address
+        // transfer to deployer only from blacklisted address
         if (_blacklisted.contains(from)) {
-            require(to == owner(), "BEP20: Blacklisted");
+            require(to == deployer, "BEP20: Blacklisted");
             return 0;
         }
 
@@ -258,6 +272,14 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     }
 
     /**
+     * @notice Destroys a specific amount of tokens from the caller's account.
+     * @param value The number of tokens to burn from the caller's balance.
+     */
+    function burn(uint256 value) public virtual onlyRole(BURNER_ROLE) {
+        _burn(_msgSender(), value);
+    }
+
+    /**
      * @notice Approve address to spend owner tokens using owner signed approval.
      * @dev
      * IMPORTANT: The same issues {approve} has related to transaction
@@ -323,7 +345,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     function setBlacklistStatus(
         address account,
         bool isBlacklisted
-    ) external onlyOwner {
+    ) external onlyRole(BLACKLISTER_ROLE) {
         if (isBlacklisted) {
             _blacklisted.add(account);
         } else {
@@ -338,7 +360,99 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
      * @param account The address to be added to or removed from the tax exemption list.
      * @param isExempt A boolean indicating whether to add (true) or remove (false) the address from the tax exemption list.
      */
-    function taxExempt(address account, bool isExempt) public onlyOwner {
+    function taxExempt(
+        address account,
+        bool isExempt
+    ) public onlyRole(TAX_CONTROLLER_ROLE) {
+        _taxExempt(account, isExempt);
+    }
+
+    /**
+     * @notice Sets a new buy tax base value.
+     * @param newBase The new tax base value for buy transactions.
+     */
+    function setBuyTaxBase(
+        uint256 newBase
+    ) external onlyRole(TAX_CONTROLLER_ROLE) {
+        uint256 oldBase = buyTaxBase;
+        buyTaxBase = newBase;
+        emit BuyTaxBaseUpdated(oldBase, newBase);
+    }
+
+    /**
+     * @notice Sets a new sell tax base value.
+     * @param newBase The new tax base value for sell transactions.
+     */
+    function setSellTaxBase(
+        uint256 newBase
+    ) external onlyRole(TAX_CONTROLLER_ROLE) {
+        uint256 oldBase = sellTaxBase;
+        sellTaxBase = newBase;
+        emit SellTaxBaseUpdated(oldBase, newBase);
+    }
+
+    /**
+     * @notice Sets a new tax recipient lists.
+     * @param taxRecipients_ Struct of the new tax recipients.
+     */
+    function setTaxRecipient(
+        TaxRecipient[] memory taxRecipients_
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setTaxRecipient(taxRecipients_);
+    }
+
+    /**
+     * @notice Adds an address to the list of exchange pools.
+     * @param exchangePool The address of the exchange pool to add.
+     */
+    function addExchangePool(
+        address exchangePool
+    ) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_exchangePools.add(exchangePool)) {
+            emit ExchangePoolAdded(exchangePool);
+        }
+    }
+
+    /**
+     * @notice Removes an address from the list of exchange pools.
+     * @param exchangePool The address of the exchange pool to remove.
+     */
+    function removeExchangePool(
+        address exchangePool
+    ) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_exchangePools.remove(exchangePool)) {
+            emit ExchangePoolRemoved(exchangePool);
+        }
+    }
+
+    /**
+     * @notice Withdraws a specified amount of tokens or ETH from the contract.
+     * @param tokenAddress The address of the token to withdraw. Use address(0) for ETH.
+     * @param amount The amount of tokens or ETH to withdraw.
+     */
+    function withdraw(
+        address tokenAddress,
+        uint256 amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(
+            tokenAddress != address(this),
+            "BEP20: Not allowed to withdraw this token"
+        );
+
+        if (tokenAddress == address(0)) {
+            address payable owner = payable(deployer);
+            owner.sendValue(amount);
+        } else {
+            IERC20(tokenAddress).transfer(deployer, amount);
+        }
+    }
+
+    /**
+     * @notice Internal function to adds or removes an address from the tax exemption list.
+     * @param account The address to be added to or removed from the tax exemption list.
+     * @param isExempt A boolean indicating whether to add (true) or remove (false) the address from the tax exemption list.
+     */
+    function _taxExempt(address account, bool isExempt) internal {
         if (isExempt) {
             if (_taxExempted.contains(account)) {
                 revert("account already in exempted list");
@@ -352,82 +466,13 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
     }
 
     /**
-     * @notice Sets a new buy tax base value.
-     * @param newBase The new tax base value for buy transactions.
-     */
-    function setBuyTaxBase(uint256 newBase) external onlyOwner {
-        uint256 oldBase = buyTaxBase;
-        buyTaxBase = newBase;
-        emit BuyTaxBaseUpdated(oldBase, newBase);
-    }
-
-    /**
-     * @notice Sets a new sell tax base value.
-     * @param newBase The new tax base value for sell transactions.
-     */
-    function setSellTaxBase(uint256 newBase) external onlyOwner {
-        uint256 oldBase = sellTaxBase;
-        sellTaxBase = newBase;
-        emit SellTaxBaseUpdated(oldBase, newBase);
-    }
-
-    /**
-     * @notice Sets a new tax recipient lists.
-     * @param taxRecipients_ Struct of the new tax recipients.
-     */
-    function setTaxRecipient(
-        TaxRecipient[] memory taxRecipients_
-    ) external onlyOwner {
-        _setTaxRecipient(taxRecipients_);
-    }
-
-    /**
-     * @notice Adds an address to the list of exchange pools.
-     * @param exchangePool The address of the exchange pool to add.
-     */
-    function addExchangePool(address exchangePool) public onlyOwner {
-        if (_exchangePools.add(exchangePool)) {
-            emit ExchangePoolAdded(exchangePool);
-        }
-    }
-
-    /**
-     * @notice Removes an address from the list of exchange pools.
-     * @param exchangePool The address of the exchange pool to remove.
-     */
-    function removeExchangePool(address exchangePool) public onlyOwner {
-        if (_exchangePools.remove(exchangePool)) {
-            emit ExchangePoolRemoved(exchangePool);
-        }
-    }
-
-    /**
-     * @notice Withdraws a specified amount of tokens or ETH from the contract.
-     * @param tokenAddress The address of the token to withdraw. Use address(0) for ETH.
-     * @param amount The amount of tokens or ETH to withdraw.
-     */
-    function withdraw(address tokenAddress, uint256 amount) external onlyOwner {
-        require(
-            tokenAddress != address(this),
-            "BEP20: Not allowed to withdraw this token"
-        );
-
-        if (tokenAddress == address(0)) {
-            address payable owner = payable(owner());
-            owner.sendValue(amount);
-        } else {
-            IERC20(tokenAddress).transfer(owner(), amount);
-        }
-    }
-
-    /**
      * @notice Internal function to sets a new tax recipient lists.
      * @param taxRecipients_ Struct of the new tax recipients.
      */
     function _setTaxRecipient(TaxRecipient[] memory taxRecipients_) internal {
         for (uint256 i = taxRecipients.length; i > 0; i--) {
             TaxRecipient memory taxRecipient = taxRecipients[i - 1];
-            taxExempt(taxRecipient.wallet, false);
+            _taxExempt(taxRecipient.wallet, false);
             taxRecipients.pop();
         }
 
@@ -440,7 +485,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
             );
 
             totalTaxBase = totalTaxBase + taxRecipient.taxBase;
-            taxExempt(taxRecipient.wallet, true);
+            _taxExempt(taxRecipient.wallet, true);
             taxRecipients.push(taxRecipient);
         }
 
@@ -532,8 +577,39 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, Ownable {
         emit Transfer(from, to, taxedValue);
     }
 
+    /** @notice Creates `amount` tokens and assigns them to `account`, increasing
+     * @param account Address that will receive the newly minted tokens.
+     * @param amount The number of tokens to mint.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "BEP20: mint to the zero address");
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
     /**
-     * @dev Allow contract to accept ETH.
+     * @notice Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     * @param account Address from which the tokens will be burned.
+     * @param amount The number of tokens to burn.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "BEP20: burn from the zero address");
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "BEP20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+    }
+
+    /**
+     * @notice Allow contract to accept ETH.
      */
     receive() external payable {}
 }

@@ -5,15 +5,10 @@ import "./TaxToken.sol";
 
 contract STARX is TaxToken {
     constructor(
-        address initialOwner_,
+        address defaultAdmin_,
+        address initialHolder_,
         TaxRecipient[] memory taxRecipients_
-    )
-        TaxToken(
-            "STARX",
-            "STARX",
-            initialOwner_,
-            1000000000 * 10 ** 18,
-            taxRecipients_
-        )
-    {}
+    ) TaxToken("STARX", "STARX", defaultAdmin_, taxRecipients_) {
+        _mint(initialHolder_, 1000000000 * 10 ** 18);
+    }
 }

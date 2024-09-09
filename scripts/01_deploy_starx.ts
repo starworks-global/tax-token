@@ -2,7 +2,6 @@ import { ethers } from "hardhat";
 
 async function main() {
   const starx = await ethers.deployContract("STARX", [
-    "0x69b82290F7115F3Dfb6E97cD3a5bF5E1278D909A",
     [
       {
         wallet: "0xA1141215Cb4Bd05097299dD7BCd6676f4c1179dE",

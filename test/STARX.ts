@@ -1,18 +1,18 @@
 import { expect } from "chai";
-import { Signer } from "ethers";
+import { parseUnits, Signer } from "ethers";
 import { ethers } from "hardhat";
 import { STARX } from "../typechain-types";
 
 const TOTAL_SUPPLY = 1_000_000_000;
-const INITIAL_BUY_TAX_BASE = 250;
-const INITIAL_SELL_TAX_BASE = 4500;
+const INITIAL_BUY_TAX_BASE = 1000;
+const INITIAL_SELL_TAX_BASE = 1000;
 
 describe("STARX", function () {
   async function createPermit(
     starx: STARX,
     owner: Signer,
     spender: Signer,
-    valueToSend: number
+    valueToSend: string
   ) {
     const domainSeparator = {
       name: "STARX",
@@ -35,7 +35,7 @@ describe("STARX", function () {
     const value = {
       owner: await owner.getAddress(),
       spender: await spender.getAddress(),
-      value: valueToSend,
+      value: parseUnits(valueToSend, "wei"),
       nonce: await starx.nonces(owner.getAddress()),
       deadline,
     };
@@ -49,11 +49,11 @@ describe("STARX", function () {
     starx: STARX,
     from: Signer,
     to: Signer,
-    amount: number
+    amount: string
   ) {
     const fromAddress = await from.getAddress();
     const toAddress = await to.getAddress();
-    return starx.getTax(fromAddress, toAddress, amount);
+    return starx.getTax(fromAddress, toAddress, parseUnits(amount, "wei"));
   }
 
   async function deployFixture() {
@@ -67,28 +67,43 @@ describe("STARX", function () {
       exchangePool2,
       user1,
       user2,
+      admin,
+      blacklister,
+      taxController,
+      burner,
+      initialHolder,
     ] = await ethers.getSigners();
     const starx = await ethers.deployContract("STARX", [
-      owner.getAddress(),
+      admin.address,
+      initialHolder.address,
       [
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
           taxBase: 3000,
         },
         {
-          wallet: await taxRecipient2.getAddress(),
+          wallet: taxRecipient2.address,
           name: "Tax Recipient 2",
           taxBase: 3000,
         },
         {
-          wallet: await taxRecipient3.getAddress(),
+          wallet: taxRecipient3.address,
           name: "Tax Recipient 2",
           taxBase: 4000,
         },
       ],
     ]);
     await starx.waitForDeployment();
+    await starx
+      .connect(admin)
+      .grantRole(await starx.BLACKLISTER_ROLE(), blacklister.address);
+    await starx
+      .connect(admin)
+      .grantRole(await starx.TAX_CONTROLLER_ROLE(), taxController.address);
+    await starx
+      .connect(admin)
+      .grantRole(await starx.BURNER_ROLE(), burner.address);
 
     return {
       starx,
@@ -100,155 +115,195 @@ describe("STARX", function () {
       exchangePool2,
       taxRecipient1,
       taxRecipient2,
+      taxRecipient3,
+      admin,
+      blacklister,
+      taxController,
+      burner,
+      initialHolder,
     };
   }
 
   describe("General", function () {
-    it("should mint", async function () {
-      const { starx } = await deployFixture();
+    it("should deploy", async function () {
+      const { starx, initialHolder } = await deployFixture();
 
-      const ownerBalance = await starx.balanceOf(await starx.owner());
-      expect(Number(ethers.formatEther(ownerBalance))).to.equal(TOTAL_SUPPLY);
+      const wallet1Balance = await starx.balanceOf(initialHolder.address);
+      expect(Number(ethers.formatEther(wallet1Balance))).to.equal(TOTAL_SUPPLY);
+
+      const totalSupply = await starx.totalSupply();
+      expect(Number(ethers.formatEther(totalSupply))).to.equal(TOTAL_SUPPLY);
     });
 
     it("should black list", async function () {
-      const { starx, owner, user1 } = await deployFixture();
+      const { starx, blacklister, user1 } = await deployFixture();
 
       const trx = await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
+        .connect(blacklister)
+        .setBlacklistStatus(user1.address, true);
+
       await expect(trx)
         .to.emit(starx, "BlackListUpdated")
-        .withArgs(await user1.getAddress(), true);
+        .withArgs(user1.address, true);
     });
 
-    it("should unblack list", async function () {
-      const { starx, owner, user1 } = await deployFixture();
+    it("should whitelist", async function () {
+      const { starx, blacklister, user1 } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
+      await starx.connect(blacklister).setBlacklistStatus(user1.address, true);
+
       const trx = await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), false);
+        .connect(blacklister)
+        .setBlacklistStatus(user1.address, false);
+
       await expect(trx)
         .to.emit(starx, "BlackListUpdated")
-        .withArgs(await user1.getAddress(), false);
+        .withArgs(user1.address, false);
     });
 
-    it("should exempt tax", async function () {
-      const { starx, owner, user1 } = await deployFixture();
+    it("should revert on black list without role", async function () {
+      const { starx, taxController, user1 } = await deployFixture();
 
-      const trx = await starx
-        .connect(owner)
-        .taxExempt(await user1.getAddress(), true);
-      await expect(trx)
-        .to.emit(starx, "TaxExemptionUpdated")
-        .withArgs(await user1.getAddress(), true);
+      await expect(
+        starx.connect(taxController).setBlacklistStatus(user1.address, true)
+      )
+        .to.be.revertedWithCustomError(
+          starx,
+          "AccessControlUnauthorizedAccount"
+        )
+        .withArgs(taxController.address, await starx.BLACKLISTER_ROLE());
     });
 
-    it("should revert on double exempt tax", async function () {
-      const { starx, owner, user1 } = await deployFixture();
+    it("should tax exempt address", async function () {
+      const { starx, taxController, user1 } = await deployFixture();
 
       const trx = await starx
-        .connect(owner)
-        .taxExempt(await user1.getAddress(), true);
+        .connect(taxController)
+        .taxExempt(user1.address, true);
+
       await expect(trx)
         .to.emit(starx, "TaxExemptionUpdated")
-        .withArgs(await user1.getAddress(), true);
+        .withArgs(user1.address, true);
+    });
+
+    it("should revert without tax controller role", async function () {
+      const { starx, blacklister, user1 } = await deployFixture();
+
+      await expect(starx.connect(blacklister).taxExempt(user1.address, true))
+        .to.be.revertedWithCustomError(
+          starx,
+          "AccessControlUnauthorizedAccount"
+        )
+        .withArgs(blacklister.address, await starx.TAX_CONTROLLER_ROLE());
+    });
+
+    it("should revert if address already in exempt list", async function () {
+      const { starx, taxController, user1 } = await deployFixture();
+
+      const trx = await starx
+        .connect(taxController)
+        .taxExempt(user1.address, true);
+      await expect(trx)
+        .to.emit(starx, "TaxExemptionUpdated")
+        .withArgs(user1.address, true);
 
       const secondTrx = starx
-        .connect(owner)
-        .taxExempt(await user1.getAddress(), true);
+        .connect(taxController)
+        .taxExempt(user1.address, true);
       await expect(secondTrx).to.be.revertedWith(
         "account already in exempted list"
       );
     });
 
-    it("should unexempt tax", async function () {
-      const { starx, owner, user1 } = await deployFixture();
+    it("should remove address from exempt list", async function () {
+      const { starx, taxController, user1 } = await deployFixture();
 
-      await starx.connect(owner).taxExempt(await user1.getAddress(), true);
+      await starx.connect(taxController).taxExempt(user1.address, true);
       const trx = await starx
-        .connect(owner)
-        .taxExempt(await user1.getAddress(), false);
+        .connect(taxController)
+        .taxExempt(user1.address, false);
       await expect(trx)
         .to.emit(starx, "TaxExemptionUpdated")
-        .withArgs(await user1.getAddress(), false);
+        .withArgs(user1.address, false);
     });
 
     it("should set buy tax base", async function () {
-      const { starx, owner } = await deployFixture();
+      const { starx, taxController } = await deployFixture();
 
-      const trx = await starx.connect(owner).setBuyTaxBase(1000);
+      const trx = await starx.connect(taxController).setBuyTaxBase(500);
       await expect(trx)
         .to.emit(starx, "BuyTaxBaseUpdated")
-        .withArgs(INITIAL_BUY_TAX_BASE, 1000);
+        .withArgs(INITIAL_BUY_TAX_BASE, 500);
     });
 
     it("should set sell tax base", async function () {
-      const { starx, owner } = await deployFixture();
+      const { starx, taxController } = await deployFixture();
 
-      const trx = await starx.connect(owner).setSellTaxBase(1000);
+      const trx = await starx.connect(taxController).setSellTaxBase(500);
       await expect(trx)
         .to.emit(starx, "SellTaxBaseUpdated")
-        .withArgs(INITIAL_SELL_TAX_BASE, 1000);
+        .withArgs(INITIAL_SELL_TAX_BASE, 500);
     });
 
     it("should add exchange pool", async function () {
-      const { starx, owner, exchangePool1 } = await deployFixture();
+      const { starx, admin, exchangePool1 } = await deployFixture();
 
       const trx = await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
+        .connect(admin)
+        .addExchangePool(exchangePool1.address);
       await expect(trx)
         .to.emit(starx, "ExchangePoolAdded")
-        .withArgs(await exchangePool1.getAddress());
+        .withArgs(exchangePool1.address);
     });
 
     it("should remove exchange pool", async function () {
-      const { starx, owner, exchangePool1 } = await deployFixture();
+      const { starx, admin, exchangePool1 } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
       const trx = await starx
-        .connect(owner)
-        .removeExchangePool(await exchangePool1.getAddress());
+        .connect(admin)
+        .removeExchangePool(exchangePool1.address);
       await expect(trx)
         .to.emit(starx, "ExchangePoolRemoved")
-        .withArgs(await exchangePool1.getAddress());
+        .withArgs(exchangePool1.address);
     });
 
     it("should set tax recipient", async function () {
-      const { starx, owner, taxRecipient1 } = await deployFixture();
+      const { starx, admin, taxRecipient1, taxRecipient2 } =
+        await deployFixture();
 
-      const trx = await starx.connect(owner).setTaxRecipient([
+      const trx = await starx.connect(admin).setTaxRecipient([
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
-          taxBase: 10000,
+          taxBase: 5000,
+        },
+        {
+          wallet: taxRecipient2.address,
+          name: "Tax Recipient 2",
+          taxBase: 5000,
         },
       ]);
 
       await expect(trx)
         .to.emit(starx, "TaxRecipientUpdated")
         .withArgs([
-          [await taxRecipient1.getAddress(), "Tax Recipient 1", 10000],
+          [taxRecipient1.address, "Tax Recipient 1", 5000],
+          [taxRecipient2.address, "Tax Recipient 2", 5000],
         ]);
     });
 
     it("should revert when set tax recipient with same address", async function () {
-      const { starx, owner, taxRecipient1 } = await deployFixture();
+      const { starx, admin, taxRecipient1 } = await deployFixture();
 
-      const trx = starx.connect(owner).setTaxRecipient([
+      const trx = starx.connect(admin).setTaxRecipient([
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
           taxBase: 5000,
         },
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 2",
           taxBase: 5000,
         },
@@ -258,11 +313,11 @@ describe("STARX", function () {
     });
 
     it("should revert if tax recipient is zero address", async function () {
-      const { starx, owner, taxRecipient1 } = await deployFixture();
+      const { starx, admin, taxRecipient1 } = await deployFixture();
 
-      const trx = starx.connect(owner).setTaxRecipient([
+      const trx = starx.connect(admin).setTaxRecipient([
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
           taxBase: 5000,
         },
@@ -277,103 +332,106 @@ describe("STARX", function () {
         "tax recipient must not be the zero address"
       );
     });
+
+    it("should revert if total tax base not 10000", async function () {
+      const { starx, admin, taxRecipient1, taxRecipient2 } =
+        await deployFixture();
+
+      const trx = starx.connect(admin).setTaxRecipient([
+        {
+          wallet: taxRecipient1.address,
+          name: "Tax Recipient 1",
+          taxBase: 5000,
+        },
+        {
+          wallet: taxRecipient2.address,
+          name: "Tax Recipient 2",
+          taxBase: 3000,
+        },
+      ]);
+
+      await expect(trx).to.be.revertedWith(
+        "invalid total tax base for tax recipients"
+      );
+    });
   });
 
   describe("Get Tax", function () {
     it("should get buy tax", async function () {
-      const { starx, owner, user1, exchangePool1 } = await deployFixture();
+      const { starx, admin, user1, exchangePool1 } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
       const buyTax = await starx.getTax(
-        await exchangePool1.getAddress(),
-        await user1.getAddress(),
-        10000
+        exchangePool1.address,
+        user1.address,
+        parseUnits("10000", "wei")
       );
-      expect(buyTax).to.equal(250);
+      expect(buyTax).to.equal(parseUnits("1000", "wei"));
     });
 
     it("should get sell tax", async function () {
-      const { starx, owner, user1, exchangePool1 } = await deployFixture();
+      const { starx, admin, user1, exchangePool1 } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
       const sellTax = await starx.getTax(
-        await user1.getAddress(),
-        await exchangePool1.getAddress(),
-        10000
+        user1.address,
+        exchangePool1.address,
+        parseUnits("5000", "wei")
       );
-      expect(sellTax).to.equal(4500);
+      expect(sellTax).to.equal(parseUnits("500", "wei"));
     });
 
     it("should get 0 tax on exempted address", async function () {
-      const { starx, owner, user1, exchangePool1 } = await deployFixture();
+      const { starx, admin, taxController, user1, exchangePool1 } =
+        await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).taxExempt(await user1.getAddress(), true);
-      const tax = await starx.getTax(
-        await user1.getAddress(),
-        await exchangePool1.getAddress(),
-        10000
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
+      await starx.connect(taxController).taxExempt(user1.address, true);
+      const taxSell = await starx.getTax(
+        user1.address,
+        exchangePool1.address,
+        parseUnits("10000", "wei")
       );
-      expect(tax).to.equal(0);
+      expect(taxSell).to.equal(0);
+
+      const taxBuy = await starx.getTax(
+        exchangePool1.address,
+        user1.address,
+        parseUnits("10000", "wei")
+      );
+      expect(taxBuy).to.equal(0);
     });
 
     it("should get 0 tax on user to user transaction", async function () {
       const { starx, user1, user2 } = await deployFixture();
 
       const tax = await starx.getTax(
-        await user1.getAddress(),
-        await user2.getAddress(),
-        10000
+        user1.address,
+        user2.address,
+        parseUnits("10000", "wei")
       );
       expect(tax).to.equal(0);
     });
 
     it("should get 0 tax on pool to pool transaction", async function () {
-      const { starx, exchangePool1, exchangePool2 } = await deployFixture();
+      const { starx, admin, exchangePool1, exchangePool2 } =
+        await deployFixture();
+
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
+      await starx.connect(admin).addExchangePool(exchangePool2.address);
 
       const tax = await starx.getTax(
-        await exchangePool1.getAddress(),
-        await exchangePool2.getAddress(),
-        10000
+        exchangePool1.address,
+        exchangePool2.address,
+        parseUnits("10000", "wei")
       );
       expect(tax).to.equal(0);
-    });
-
-    it("should get 0 tax on transfer to contract owner", async function () {
-      const { starx, owner, user1 } = await deployFixture();
-
-      const tax = await starx.getTax(
-        await user1.getAddress(),
-        await owner.getAddress(),
-        10000
-      );
-      expect(tax).to.equal(0);
-    });
-
-    it("should not get tax - blacklisted", async function () {
-      const { starx, owner, user1, user2 } = await deployFixture();
-
-      await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
-      const tax = starx.getTax(
-        await user1.getAddress(),
-        await user2.getAddress(),
-        10000
-      );
-      await expect(tax).to.be.revertedWith("BEP20: Blacklisted");
     });
   });
 
   describe("Permit", function () {
     it("should permit", async function () {
-      const { starx, owner, user1, operator } = await deployFixture();
+      const { starx, user1, operator } = await deployFixture();
 
       const domainSeparator = {
         name: "STARX",
@@ -394,47 +452,51 @@ describe("STARX", function () {
 
       const deadline = Math.floor(new Date().getTime() / 1000) + 3600;
       const value = {
-        owner: await owner.getAddress(),
-        spender: await user1.getAddress(),
-        value: 100,
-        nonce: await starx.nonces(owner.getAddress()),
+        owner: user1.address,
+        spender: operator.address,
+        value: parseUnits("100", "wei"),
+        nonce: await starx.nonces(user1.address),
         deadline,
       };
 
-      const signature = await owner.signTypedData(
+      const signature = await user1.signTypedData(
         domainSeparator,
         types,
         value
       );
+
       const initialAllowance = await starx.allowance(
-        await owner.getAddress(),
-        await user1.getAddress()
+        user1.address,
+        operator.address
       );
+
       const { r, s, v } = ethers.Signature.from(signature);
       expect(initialAllowance).to.equal(0);
+
       await starx
         .connect(operator)
         .permit(
-          await owner.getAddress(),
-          await user1.getAddress(),
-          100,
+          user1.address,
+          operator.address,
+          parseUnits("100", "wei"),
           deadline,
           v,
           r,
           s
         );
+
       const afterAllowance = await starx.allowance(
-        await owner.getAddress(),
-        await user1.getAddress()
+        user1.address,
+        operator.address
       );
-      expect(afterAllowance).to.equal(100);
+      expect(afterAllowance).to.equal(parseUnits("100", "wei"));
     });
 
     it("should not permit - wrong signer", async function () {
-      const { starx, owner, user1, operator, user2 } = await deployFixture();
+      const { starx, user1, operator, user2 } = await deployFixture();
 
       const domainSeparator = {
-        name: "Taxed Token",
+        name: "STARX",
         version: "1",
         chainId: 31337,
         verifyingContract: await starx.getAddress(),
@@ -452,10 +514,10 @@ describe("STARX", function () {
 
       const deadline = Math.floor(new Date().getTime() / 1000) + 3600;
       const value = {
-        owner: await owner.getAddress(),
-        spender: await user1.getAddress(),
-        value: 100,
-        nonce: await starx.nonces(owner.getAddress()),
+        owner: user1.address,
+        spender: operator.address,
+        value: parseUnits("100", "wei"),
+        nonce: await starx.nonces(user1.address),
         deadline,
       };
 
@@ -468,9 +530,9 @@ describe("STARX", function () {
       const trx = starx
         .connect(operator)
         .permit(
-          await owner.getAddress(),
-          await user1.getAddress(),
-          100,
+          user1.address,
+          operator.address,
+          parseUnits("100", "wei"),
           deadline,
           v,
           r,
@@ -482,253 +544,240 @@ describe("STARX", function () {
 
   describe("Non-Taxed Transfer", function () {
     it("should not transfer - blacklisted", async function () {
-      const { starx, owner, user1, user2 } = await deployFixture();
+      const { starx, blacklister, user1, user2, initialHolder } =
+        await deployFixture();
 
+      await starx.connect(blacklister).setBlacklistStatus(user1.address, true);
       await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
       const trx = starx
         .connect(user1)
-        .transfer(await user2.getAddress(), 10000);
+        .transfer(user2.address, parseUnits("10000", "wei"));
       await expect(trx).to.be.revertedWith("BEP20: Blacklisted");
     });
 
     it("should transfer - user to user", async function () {
-      const { starx, owner, user1, user2 } = await deployFixture();
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+      const { starx, user1, user2, initialHolder } = await deployFixture();
 
-      await starx.connect(user1).transfer(await user2.getAddress(), 10000);
-      const balance = await starx.balanceOf(await user2.getAddress());
-      expect(balance).to.equal(10000);
+      await starx
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
+      await starx
+        .connect(user1)
+        .transfer(user2.address, parseUnits("10000", "wei"));
+
+      const balance = await starx.balanceOf(user2.address);
+      expect(balance).to.equal(parseUnits("10000", "wei"));
     });
 
     it("should transfer - tax exempt", async function () {
-      const { starx, owner, user1, exchangePool1 } = await deployFixture();
+      const {
+        starx,
+        admin,
+        taxController,
+        user1,
+        exchangePool1,
+        initialHolder,
+      } = await deployFixture();
+
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
+      await starx.connect(taxController).taxExempt(user1.address, true);
+
       await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).taxExempt(await user1.getAddress(), true);
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
       await starx
         .connect(user1)
-        .transfer(await exchangePool1.getAddress(), 10000);
-      const balance = await starx.balanceOf(await exchangePool1.getAddress());
-      expect(balance).to.equal(10000);
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
+      const balance = await starx.balanceOf(exchangePool1.address);
+      expect(balance).to.equal(parseUnits("10000", "wei"));
     });
   });
 
   describe("Taxed Transfer", function () {
     it("should not transfer - blacklisted", async function () {
-      const { starx, owner, user1, exchangePool1 } = await deployFixture();
+      const { starx, blacklister, user1, exchangePool1, initialHolder } =
+        await deployFixture();
 
+      await starx.connect(blacklister).setBlacklistStatus(user1.address, true);
       await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
       const trx = starx
         .connect(user1)
-        .transfer(await exchangePool1.getAddress(), 10000);
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
+
       await expect(trx).to.be.revertedWith("BEP20: Blacklisted");
     });
 
     it("should transfer - sell single tax recipient", async function () {
       const {
         starx,
-        owner,
+        admin,
         user1,
         exchangePool1,
         taxRecipient1,
-        taxRecipient2,
+        initialHolder,
       } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
 
-      await starx.connect(owner).setTaxRecipient([
+      await starx.connect(admin).setTaxRecipient([
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
           taxBase: 10000,
         },
       ]);
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+
+      await starx
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
       await starx
         .connect(user1)
-        .transfer(await exchangePool1.getAddress(), 10000);
-      const exchangeBalance = await starx.balanceOf(
-        await exchangePool1.getAddress()
-      );
-      const taxBalance = await starx.balanceOf(
-        await taxRecipient1.getAddress()
-      );
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
 
-      const totalTax = await getTax(starx, user1, exchangePool1, 10000);
-      expect(exchangeBalance).to.equal(10000n - totalTax);
-      expect(taxBalance).to.equal(totalTax);
+      const exchangeBalance = await starx.balanceOf(exchangePool1.address);
+      const taxBalance = await starx.balanceOf(taxRecipient1.address);
+
+      expect(exchangeBalance).to.equal(
+        parseUnits("10000", "wei") - parseUnits("1000", "wei")
+      );
+      expect(taxBalance).to.equal(parseUnits("1000", "wei"));
     });
 
     it("should transfer - sell multiple tax recipients", async function () {
       const {
         starx,
-        owner,
+        admin,
         user1,
         exchangePool1,
         taxRecipient1,
         taxRecipient2,
+        taxRecipient3,
+        initialHolder,
       } = await deployFixture();
+
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
+
       await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 10000,
-        },
-      ]);
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 5000,
-        },
-        {
-          wallet: await taxRecipient2.getAddress(),
-          name: "Tax Recipient 2",
-          taxBase: 5000,
-        },
-      ]);
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
       await starx
         .connect(user1)
-        .transfer(await exchangePool1.getAddress(), 10000);
-      const exchangeBalance = await starx.balanceOf(
-        await exchangePool1.getAddress()
-      );
-      const taxBalance1 = await starx.balanceOf(
-        await taxRecipient1.getAddress()
-      );
-      const taxBalance2 = await starx.balanceOf(
-        await taxRecipient2.getAddress()
-      );
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
 
-      const totalTax = await getTax(starx, user1, exchangePool1, 10000);
-      expect(exchangeBalance).to.equal(10000n - totalTax);
-      expect(taxBalance1).to.equal(totalTax / 2n);
-      expect(taxBalance2).to.equal(totalTax / 2n);
+      const exchangeBalance = await starx.balanceOf(exchangePool1.address);
+      const taxBalance1 = await starx.balanceOf(taxRecipient1.address);
+      const taxBalance2 = await starx.balanceOf(taxRecipient2.address);
+      const taxBalance3 = await starx.balanceOf(taxRecipient3.address);
+
+      expect(exchangeBalance).to.equal(parseUnits("9000", "wei"));
+      expect(taxBalance1).to.equal(parseUnits("300", "wei"));
+      expect(taxBalance2).to.equal(parseUnits("300", "wei"));
+      expect(taxBalance3).to.equal(parseUnits("400", "wei"));
     });
 
     it("should transfer - buy single tax recipients", async function () {
       const {
         starx,
-        owner,
+        admin,
         user1,
         exchangePool1,
         taxRecipient1,
-        taxRecipient2,
+        initialHolder,
       } = await deployFixture();
 
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).setTaxRecipient([
+      await starx.connect(admin).setTaxRecipient([
         {
-          wallet: await taxRecipient1.getAddress(),
+          wallet: taxRecipient1.address,
           name: "Tax Recipient 1",
           taxBase: 10000,
         },
       ]);
+
       await starx
-        .connect(owner)
-        .transfer(await exchangePool1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
+
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
 
       await starx
         .connect(exchangePool1)
-        .transfer(await user1.getAddress(), 10000);
-      const user1Balance = await starx.balanceOf(await user1.getAddress());
-      const taxBalance = await starx.balanceOf(
-        await taxRecipient1.getAddress()
-      );
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
-      const totalTax = await getTax(starx, exchangePool1, user1, 10000);
-      expect(user1Balance).to.equal(10000n - totalTax);
+      const user1Balance = await starx.balanceOf(user1.address);
+      const taxBalance = await starx.balanceOf(taxRecipient1.address);
+
+      const totalTax = await getTax(starx, exchangePool1, user1, "10000");
+      expect(user1Balance).to.equal(parseUnits("10000", "wei") - totalTax);
       expect(taxBalance).to.equal(totalTax);
     });
 
     it("should transfer - buy multiple tax recipient", async function () {
       const {
         starx,
-        owner,
+        admin,
         user1,
         exchangePool1,
         taxRecipient1,
         taxRecipient2,
+        taxRecipient3,
+        initialHolder,
       } = await deployFixture();
 
       await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 5000,
-        },
-        {
-          wallet: await taxRecipient2.getAddress(),
-          name: "Tax Recipient 2",
-          taxBase: 5000,
-        },
-      ]);
-      await starx
-        .connect(owner)
-        .transfer(await exchangePool1.getAddress(), 10000);
+        .connect(initialHolder)
+        .transfer(exchangePool1.address, parseUnits("10000", "wei"));
+
+      await starx.connect(admin).addExchangePool(exchangePool1.address);
 
       await starx
         .connect(exchangePool1)
-        .transfer(await user1.getAddress(), 10000);
-      const user1Balance = await starx.balanceOf(await user1.getAddress());
-      const taxRecipient1Balance = await starx.balanceOf(
-        await taxRecipient1.getAddress()
-      );
-      const taxRecipient2Balance = await starx.balanceOf(
-        await taxRecipient2.getAddress()
-      );
+        .transfer(user1.address, parseUnits("10000", "wei"));
 
-      const totalTax = await getTax(starx, exchangePool1, user1, 10000);
-      expect(user1Balance).to.equal(10000n - totalTax);
-      expect(taxRecipient1Balance).to.equal(totalTax / 2n);
-      expect(taxRecipient2Balance).to.equal(totalTax / 2n);
+      const user1Balance = await starx.balanceOf(user1.address);
+      const taxRecipient1Balance = await starx.balanceOf(taxRecipient1.address);
+      const taxRecipient2Balance = await starx.balanceOf(taxRecipient2.address);
+      const taxRecipient3Balance = await starx.balanceOf(taxRecipient3.address);
+
+      const totalTax = await getTax(starx, exchangePool1, user1, "10000");
+      expect(user1Balance).to.equal(parseUnits("10000", "wei") - totalTax);
+      expect(taxRecipient1Balance).to.equal(parseUnits("300", "wei"));
+      expect(taxRecipient2Balance).to.equal(parseUnits("300", "wei"));
+      expect(taxRecipient3Balance).to.equal(parseUnits("400", "wei"));
     });
   });
 
   describe("Permitted Non-Taxed Transfer", function () {
     it("should not transfer - blacklisted", async function () {
-      const { starx, owner, user1, operator, user2 } = await deployFixture();
+      const { starx, blacklister, user1, operator, user2, initialHolder } =
+        await deployFixture();
 
-      await starx.connect(owner).transfer(await user1.getAddress(), 100);
       await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("1000", "wei"));
+
+      await starx.connect(blacklister).setBlacklistStatus(user1.address, true);
+
       const { deadline, v, r, s } = await createPermit(
         starx,
         user1,
         user2,
-        100
+        "1000"
       );
       await starx
         .connect(operator)
         .permit(
-          await user1.getAddress(),
-          await user2.getAddress(),
-          100,
+          user1.address,
+          user2.address,
+          parseUnits("1000", "wei"),
           deadline,
           v,
           r,
@@ -737,26 +786,31 @@ describe("STARX", function () {
 
       const trx = starx
         .connect(operator)
-        .transferFrom(await user1.getAddress(), await user2.getAddress(), 100);
+        .transferFrom(user1.address, user2.address, parseUnits("1000", "wei"));
       await expect(trx).to.be.revertedWith("BEP20: Blacklisted");
     });
 
     it("should not transfer - insufficient allowance", async function () {
-      const { starx, owner, user1, operator, user2 } = await deployFixture();
+      const { starx, user1, operator, user2, initialHolder } =
+        await deployFixture();
 
-      await starx.connect(owner).transfer(await user1.getAddress(), 200);
+      await starx
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("1000", "wei"));
+
       const { deadline, v, r, s } = await createPermit(
         starx,
         user1,
         user2,
-        100
+        "1000"
       );
+
       await starx
         .connect(operator)
         .permit(
-          await user1.getAddress(),
-          await user2.getAddress(),
-          100,
+          user1.address,
+          user2.address,
+          parseUnits("1000", "wei"),
           deadline,
           v,
           r,
@@ -765,202 +819,96 @@ describe("STARX", function () {
 
       const trx = starx
         .connect(operator)
-        .transferFrom(await user1.getAddress(), await user2.getAddress(), 200);
+        .transferFrom(user1.address, user2.address, parseUnits("1000", "wei"));
       await expect(trx).to.be.revertedWith(
         "BEP20: Transfer amount exceeds allowance."
       );
     });
 
     it("should transfer", async function () {
-      const { starx, owner, user1, operator, user2, taxRecipient1 } =
+      const { starx, user1, operator, user2, initialHolder } =
         await deployFixture();
 
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 10000,
-        },
-      ]);
+      await starx
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("10000", "wei"));
+
       const { deadline, v, r, s } = await createPermit(
         starx,
         user1,
         operator,
-        10000
+        "1000"
       );
-      await starx
-        .connect(operator)
-        .permit(await user1.getAddress(), operator, 10000, deadline, v, r, s);
 
       await starx
         .connect(operator)
-        .transferFrom(
-          await user1.getAddress(),
-          await user2.getAddress(),
-          10000
+        .permit(
+          user1.address,
+          operator,
+          parseUnits("1000", "wei"),
+          deadline,
+          v,
+          r,
+          s
         );
-      const balance = await starx.balanceOf(await user2.getAddress());
-      expect(balance).to.equal(10000);
-    });
-
-    it("should transfer - tax exempt", async function () {
-      const { starx, owner, user1, operator, exchangePool1, taxRecipient1 } =
-        await deployFixture();
-
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 10000,
-        },
-      ]);
-      await starx.connect(owner).taxExempt(await user1.getAddress(), true);
-      const { deadline, v, r, s } = await createPermit(
-        starx,
-        user1,
-        operator,
-        10000
-      );
-      await starx
-        .connect(operator)
-        .permit(await user1.getAddress(), operator, 10000, deadline, v, r, s);
 
       await starx
         .connect(operator)
-        .transferFrom(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          10000
-        );
-      const balance = await starx.balanceOf(await exchangePool1.getAddress());
-      expect(balance).to.equal(10000);
+        .transferFrom(user1.address, user2.address, parseUnits("1000", "wei"));
+      const balance = await starx.balanceOf(user2.address);
+      expect(balance).to.equal(parseUnits("1000", "wei"));
     });
   });
 
-  describe("Permitted Taxed Transfer", function () {
-    it("should not transfer - blacklisted", async function () {
-      const { starx, owner, user1, operator, exchangePool1 } =
-        await deployFixture();
+  describe("ERC20", function () {
+    it("should approve", async function () {
+      const { starx, user1, operator, initialHolder } = await deployFixture();
 
-      await starx.connect(owner).transfer(await user1.getAddress(), 100);
       await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx
-        .connect(owner)
-        .setBlacklistStatus(await user1.getAddress(), true);
-      const { deadline, v, r, s } = await createPermit(
-        starx,
-        user1,
-        exchangePool1,
-        100
-      );
-      await starx
-        .connect(operator)
-        .permit(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          100,
-          deadline,
-          v,
-          r,
-          s
-        );
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("1000", "wei"));
 
-      const trx = starx
-        .connect(operator)
-        .transferFrom(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          100
-        );
-      await expect(trx).to.be.revertedWith("BEP20: Blacklisted");
+      await starx
+        .connect(user1)
+        .approve(operator.address, parseUnits("100", "wei"));
+
+      const allowance = await starx.allowance(user1.address, operator.address);
+      expect(allowance).to.equal(parseUnits("100", "wei"));
     });
 
-    it("should not transfer - insufficient allowance", async function () {
-      const { starx, owner, user1, operator, exchangePool1 } =
-        await deployFixture();
+    it("should burn", async function () {
+      const { starx, burner, initialHolder } = await deployFixture();
 
-      await starx.connect(owner).transfer(await user1.getAddress(), 200);
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      const { deadline, v, r, s } = await createPermit(
-        starx,
-        user1,
-        exchangePool1,
-        100
-      );
-      await starx
-        .connect(operator)
-        .permit(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          100,
-          deadline,
-          v,
-          r,
-          s
-        );
+      const totalSupply = await starx.totalSupply();
 
-      const trx = starx
-        .connect(operator)
-        .transferFrom(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          200
-        );
-      await expect(trx).to.be.revertedWith(
-        "BEP20: Transfer amount exceeds allowance."
+      await starx
+        .connect(initialHolder)
+        .transfer(burner.address, parseUnits("1000", "wei"));
+
+      await starx.connect(burner).burn(parseUnits("100", "wei"));
+
+      const balance = await starx.balanceOf(burner.address);
+      expect(balance).to.equal(
+        parseUnits("1000", "wei") - parseUnits("100", "wei")
       );
+
+      const supplyAfter = await starx.totalSupply();
+      expect(supplyAfter).to.equal(totalSupply - parseUnits("100", "wei"));
     });
 
-    it("should transfer - sell", async function () {
-      const { starx, owner, user1, operator, exchangePool1, taxRecipient1 } =
-        await deployFixture();
-
-      await starx.connect(owner).transfer(await user1.getAddress(), 10000);
-      await starx
-        .connect(owner)
-        .addExchangePool(await exchangePool1.getAddress());
-      await starx.connect(owner).setTaxRecipient([
-        {
-          wallet: await taxRecipient1.getAddress(),
-          name: "Tax Recipient 1",
-          taxBase: 10000,
-        },
-      ]);
-      const { deadline, v, r, s } = await createPermit(
-        starx,
-        user1,
-        operator,
-        10000
-      );
-      await starx
-        .connect(operator)
-        .permit(await user1.getAddress(), operator, 10000, deadline, v, r, s);
+    it("should revert on burn without role", async function () {
+      const { starx, initialHolder, user1 } = await deployFixture();
 
       await starx
-        .connect(operator)
-        .transferFrom(
-          await user1.getAddress(),
-          await exchangePool1.getAddress(),
-          10000
-        );
-      const exchangeBalance = await starx.balanceOf(
-        await exchangePool1.getAddress()
-      );
-      const taxRecipientBalance = await starx.balanceOf(
-        await taxRecipient1.getAddress()
-      );
-      const totalTax = await getTax(starx, user1, exchangePool1, 10000);
-      expect(exchangeBalance).to.equal(10000n - totalTax);
-      expect(taxRecipientBalance).to.equal(totalTax);
+        .connect(initialHolder)
+        .transfer(user1.address, parseUnits("1000", "wei"));
+
+      await expect(starx.connect(user1).burn(parseUnits("100", "wei")))
+        .to.be.revertedWithCustomError(
+          starx,
+          "AccessControlUnauthorizedAccount"
+        )
+        .withArgs(user1.address, await starx.BURNER_ROLE());
     });
   });
 });
