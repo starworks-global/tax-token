@@ -443,7 +443,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
             address payable owner = payable(deployer);
             owner.sendValue(amount);
         } else {
-            IERC20(tokenAddress).transfer(deployer, amount);
+            IERC20(tokenAddress).safeTransfer(deployer, amount);
         }
     }
 
@@ -569,7 +569,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
                 }
 
                 _balances[address(taxRecipient.wallet)] += taxAmount;
-                emit Transfer(from, address(taxRecipient.wallet), totalTax);
+                emit Transfer(from, address(taxRecipient.wallet), taxAmount);
                 totalTax -= taxAmount;
             }
         }
