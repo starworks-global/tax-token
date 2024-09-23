@@ -60,6 +60,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
     EnumerableSet.AddressSet private _blacklisted;
     EnumerableSet.AddressSet private _taxExempted;
     EnumerableSet.AddressSet private _exchangePools;
+    EnumerableSet.AddressSet private _taxRecipientSet;
 
     /// @notice Buy tax in basis points.
     uint256 public buyTaxBase = 1000;
@@ -454,9 +455,6 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
      */
     function _taxExempt(address account, bool isExempt) internal {
         if (isExempt) {
-            if (_taxExempted.contains(account)) {
-                revert("account already in exempted list");
-            }
             _taxExempted.add(account);
         } else {
             _taxExempted.remove(account);
@@ -473,6 +471,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
         for (uint256 i = taxRecipients.length; i > 0; i--) {
             TaxRecipient memory taxRecipient = taxRecipients[i - 1];
             _taxExempt(taxRecipient.wallet, false);
+            _taxRecipientSet.remove(taxRecipient.wallet);
             taxRecipients.pop();
         }
 
@@ -484,8 +483,14 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
                 "tax recipient must not be the zero address"
             );
 
+            require(
+                !_taxRecipientSet.contains(taxRecipient.wallet),
+                "account already in tax recipients list"
+            );
+
             totalTaxBase = totalTaxBase + taxRecipient.taxBase;
             _taxExempt(taxRecipient.wallet, true);
+            _taxRecipientSet.add(taxRecipient.wallet);
             taxRecipients.push(taxRecipient);
         }
 

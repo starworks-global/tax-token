@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { parseUnits, Signer } from "ethers";
+import { parseEther, parseUnits, Signer } from "ethers";
 import { ethers } from "hardhat";
 import { STARX } from "../typechain-types";
 
@@ -197,24 +197,6 @@ describe("STARX", function () {
         .withArgs(blacklister.address, await starx.TAX_CONTROLLER_ROLE());
     });
 
-    it("should revert if address already in exempt list", async function () {
-      const { starx, taxController, user1 } = await deployFixture();
-
-      const trx = await starx
-        .connect(taxController)
-        .taxExempt(user1.address, true);
-      await expect(trx)
-        .to.emit(starx, "TaxExemptionUpdated")
-        .withArgs(user1.address, true);
-
-      const secondTrx = starx
-        .connect(taxController)
-        .taxExempt(user1.address, true);
-      await expect(secondTrx).to.be.revertedWith(
-        "account already in exempted list"
-      );
-    });
-
     it("should remove address from exempt list", async function () {
       const { starx, taxController, user1 } = await deployFixture();
 
@@ -293,8 +275,54 @@ describe("STARX", function () {
         ]);
     });
 
+    it("should replace tax recipient", async function () {
+      const { starx, admin, taxRecipient1, taxRecipient2, taxRecipient3 } =
+        await deployFixture();
+
+      let trx = await starx.connect(admin).setTaxRecipient([
+        {
+          wallet: taxRecipient1.address,
+          name: "Tax Recipient 1",
+          taxBase: 5000,
+        },
+        {
+          wallet: taxRecipient2.address,
+          name: "Tax Recipient 2",
+          taxBase: 5000,
+        },
+      ]);
+
+      await expect(trx)
+        .to.emit(starx, "TaxRecipientUpdated")
+        .withArgs([
+          [taxRecipient1.address, "Tax Recipient 1", 5000],
+          [taxRecipient2.address, "Tax Recipient 2", 5000],
+        ]);
+
+      trx = await starx.connect(admin).setTaxRecipient([
+        {
+          wallet: taxRecipient1.address,
+          name: "Tax Recipient 1",
+          taxBase: 6000,
+        },
+        {
+          wallet: taxRecipient3.address,
+          name: "Tax Recipient 2",
+          taxBase: 4000,
+        },
+      ]);
+
+      await expect(trx)
+        .to.emit(starx, "TaxRecipientUpdated")
+        .withArgs([
+          [taxRecipient1.address, "Tax Recipient 1", 6000],
+          [taxRecipient3.address, "Tax Recipient 2", 4000],
+        ]);
+    });
+
     it("should revert when set tax recipient with same address", async function () {
-      const { starx, admin, taxRecipient1 } = await deployFixture();
+      const { starx, admin, taxRecipient1, taxRecipient2 } =
+        await deployFixture();
 
       const trx = starx.connect(admin).setTaxRecipient([
         {
@@ -303,13 +331,20 @@ describe("STARX", function () {
           taxBase: 5000,
         },
         {
+          wallet: taxRecipient2.address,
+          name: "Tax Recipient 2",
+          taxBase: 3000,
+        },
+        {
           wallet: taxRecipient1.address,
           name: "Tax Recipient 2",
-          taxBase: 5000,
+          taxBase: 2000,
         },
       ]);
 
-      await expect(trx).to.be.revertedWith("account already in exempted list");
+      await expect(trx).to.be.revertedWith(
+        "account already in tax recipients list"
+      );
     });
 
     it("should revert if tax recipient is zero address", async function () {
@@ -909,6 +944,59 @@ describe("STARX", function () {
           "AccessControlUnauthorizedAccount"
         )
         .withArgs(user1.address, await starx.BURNER_ROLE());
+    });
+
+    it("should withdraw native token", async function () {
+      const { starx, owner, admin, user1 } = await deployFixture();
+
+      const balance = await ethers.provider.getBalance(owner.address);
+
+      await user1.sendTransaction({
+        to: await starx.getAddress(),
+        value: parseEther("1.0"),
+      });
+
+      await starx
+        .connect(admin)
+        .withdraw(
+          "0x0000000000000000000000000000000000000000",
+          parseEther("1")
+        );
+
+      const balanceAfter = await ethers.provider.getBalance(owner.address);
+      expect(balanceAfter).to.be.equal(balance + parseEther("1.0"));
+    });
+
+    it("should withdraw other token", async function () {
+      const { starx, owner, admin, user1, initialHolder, taxRecipient1 } =
+        await deployFixture();
+
+      // other token deployment
+      const starxp = await ethers.deployContract("STARX", [
+        admin.address,
+        initialHolder.address,
+        [
+          {
+            wallet: taxRecipient1.address,
+            name: "Tax Recipient 1",
+            taxBase: 10000,
+          },
+        ],
+      ]);
+
+      await starxp
+        .connect(initialHolder)
+        .transfer(await starx.getAddress(), parseUnits("1000", "wei"));
+
+      const balance = await starxp.balanceOf(await starx.getAddress());
+
+      await starx
+        .connect(admin)
+        .withdraw(await starxp.getAddress(), parseUnits("1000", "wei"));
+
+      expect(await starxp.balanceOf(await starx.getAddress())).to.be.equal(
+        balance - parseUnits("1000", "wei")
+      );
     });
   });
 });
