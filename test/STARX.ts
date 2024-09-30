@@ -227,6 +227,24 @@ describe("STARX", function () {
         .withArgs(INITIAL_SELL_TAX_BASE, 500);
     });
 
+    it("should revert if buy tax base more than 5000", async function () {
+      const { starx, taxController } = await deployFixture();
+
+      const trx = starx.connect(taxController).setBuyTaxBase(6000);
+      await expect(trx).to.be.revertedWith(
+        "The buy tax basis point must be below 5000"
+      );
+    });
+
+    it("should revert if sell tax base more than 5000", async function () {
+      const { starx, taxController } = await deployFixture();
+
+      const trx = starx.connect(taxController).setSellTaxBase(6000);
+      await expect(trx).to.be.revertedWith(
+        "The sell tax basis point must be below 5000"
+      );
+    });
+
     it("should add exchange pool", async function () {
       const { starx, admin, exchangePool1 } = await deployFixture();
 

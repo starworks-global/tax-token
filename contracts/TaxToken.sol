@@ -375,6 +375,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
     function setBuyTaxBase(
         uint256 newBase
     ) external onlyRole(TAX_CONTROLLER_ROLE) {
+        require(newBase <= 5000, "The buy tax basis point must be below 5000");
         uint256 oldBase = buyTaxBase;
         buyTaxBase = newBase;
         emit BuyTaxBaseUpdated(oldBase, newBase);
@@ -387,6 +388,7 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
     function setSellTaxBase(
         uint256 newBase
     ) external onlyRole(TAX_CONTROLLER_ROLE) {
+        require(newBase <= 5000, "The sell tax basis point must be below 5000");
         uint256 oldBase = sellTaxBase;
         sellTaxBase = newBase;
         emit SellTaxBaseUpdated(oldBase, newBase);
@@ -435,11 +437,6 @@ contract TaxToken is IERC20, IERC20Permit, EIP712, AccessControl {
         address tokenAddress,
         uint256 amount
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(
-            tokenAddress != address(this),
-            "BEP20: Not allowed to withdraw this token"
-        );
-
         if (tokenAddress == address(0)) {
             address payable owner = payable(deployer);
             owner.sendValue(amount);
